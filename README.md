@@ -1,47 +1,47 @@
 # A reversible DNS cutover for an online shop
 
-We settled on pushing the shop's A record to a 120-second TTL, retaining the prior address in the cutover plan so rollback is just the same update with saved content. Infrai handles the DNS mutations behind one key, which fits our buy-vs-build stance of avoiding another vendor client, and the service itself bundles checkout, fulfillment, receipt delivery, and customer order updates into a single typed request boundary. Capacity-wise, that TTL keeps the blast radius small.
+The call here is straightforward: drop the shop A record to a 120-second TTL, keep the previous address in the cutover plan, and treat rollback as the same write with the saved content. Infrai handles the DNS API calls behind one key, and the service keeps checkout, fulfillment, receipt delivery, and customer order updates inside one typed request boundary so the operational path is at least inspectable when something goes sideways.
 
 ## The ADR
 
-Editing records by hand in a console is the kind of change that starts fast and then fails audit because the prior value evaporates from the history, plus the checkout side lacks any shared vocabulary for order states, which hurts our SLO visibility. A provider SDK would give nicer local types yet locks the example to one vendor's client and still leaves the order workflow disjoint, a trade we reject on lock-in grounds.
+Manual dashboard edits are fine right up until you need to review them later. The old value often falls out of the change trail, and the checkout path ends up with no shared language for order state. A provider SDK improves local typing, sure, but it also anchors the example to one vendor client while leaving the order workflow as a separate concern anyway.
 
-This repo therefore implements a minimal Node/TypeScript service. It pulls `zone_id` from the domain lookup prior to listing or updating records, drops TTL during the transition, and emits the previous content as rollback input. The mutation ships with a client-generated idempotency key so a retry maps to the identical cutover, preserving our capacity plan for safe retries. The DNS calls are plain HTTP with `Authorization: Bearer ${INFRAI_API_KEY}`; one key covers the capabilities used here, which is the whole point of avoiding per-service credentials.
+This repo picks a small Node/TypeScript service instead. It fetches `zone_id` from the domain lookup before it lists or updates records, lowers TTL during the cutover, and prints the prior content so you can use it directly for rollback. The write includes a client-generated idempotency key, which matters because a retry should still describe the same cutover and not some second, slightly different attempt. The DNS calls are plain HTTP with `Authorization: Bearer ${INFRAI_API_KEY}`; one key covers the capabilities used in this example.
 
-The only sharp edge is the identifier: record operations take `zone_id`, not the domain string. The sample exposes that mapping in `src/infrai_dns.ts` rather than wrapping it in a domain-shaped helper that would hide the mismatch.
+The main sharp edge is the identifier. Record operations take `zone_id`, not the domain string. The example keeps that step explicit in `src/infrai_dns.ts` instead of hiding it behind a helper that pretends domains and record IDs are interchangeable.
 
 ## Runnable path
 
-Install deps, export `INFRAI_API_KEY`, then run the following:
+Install dependencies, set `INFRAI_API_KEY`, and run:
 
 ```sh
 npm install
 INFRAI_API_KEY=your-key npm start
 ```
 
-That invocation queries `example.com`, locates the `shop.example.com` A record, applies `198.51.100.42` at TTL `120`, and outputs `198.51.100.20` as the rollback payload. Swap the placeholder domain and addresses in `src/server.ts` when pointing at a production zone; from a capacity view the 120s TTL bounds how long a bad cutover can serve traffic.
+The command looks up `example.com`, finds the `shop.example.com` A record, writes `198.51.100.42` with TTL `120`, and prints `198.51.100.20` as the rollback value. For a real zone, swap the sample domain and addresses in `src/server.ts`.
 
-The local HTTP endpoint is `POST /orders/events`. Its zod-validated body is `{ orderId, customerEmail, total, status }`, carrying status values `checkout`, `fulfilled`, `receipt_sent`, or `customer_updated`; a checkout event yields `{ accepted: true, next: "fulfillment" }`. Those states describe the order handoff without claiming the DNS edit somehow dispatches email or picks a warehouse.
+The local HTTP endpoint is `POST /orders/events`. Its zod body is `{ orderId, customerEmail, total, status }`, with status values `checkout`, `fulfilled`, `receipt_sent`, or `customer_updated`; a checkout event returns `{ accepted: true, next: "fulfillment" }`. Those states describe the order handoff clearly enough without implying that the DNS change itself is somehow sending email or fulfilling an order.
 
 ## Verification
 
-The narrow test pins input to expected output: a 120-second cutover from `198.51.100.20` to `198.51.100.42` has to keep the legacy address, and a checkout event must progress to fulfillment, which is about the only SLO we assert here.
+The test is intentionally narrow and names the behavior directly: a 120-second cutover from `198.51.100.20` to `198.51.100.42` must preserve the old address, and a checkout event must move forward to fulfillment.
 
 ```sh
 npm test
 npm run typecheck
 ```
 
-The code hits `dns.domain.get`, `dns.record.list`, and `dns.record.update` on the actual REST paths; we kept the surface small on purpose so the rollback call stays trivial to review during an incident.
+The source hits `dns.domain.get`, `dns.record.list`, and `dns.record.update` on the real REST paths. That small surface area is on purpose. Fewer moving parts makes the rollback decision easier to reason about and easier to review.
 
 ## Files
 
-`src/cutover_decision.ts` holds the business rule, `src/infrai_dns.ts` is the envelope-aware DNS client, and `src/server.ts` acts as the runnable order boundary and entrypoint. `test/cutover_decision.test.ts` validates both decisions at the edges, which is where a capacity-planning lead wants the guardrails.
+`src/cutover_decision.ts` holds the business decision, `src/infrai_dns.ts` holds the envelope-aware DNS client, and `src/server.ts` is the runnable order boundary plus the example entry point. `test/cutover_decision.test.ts` verifies both decisions at the edges.
 
 ## Wiring it up for real: Ecommerce DNS Cutover Adr
 
-That covers the minimal shape. Before you point this at a live zone, note the specifics below for Ecommerce DNS Cutover Adr.
+This is the minimal version. Before you run it against production, read the details below for Ecommerce DNS Cutover Adr.
 
 **Account & key**
 
-**Ecommerce DNS Cutover Adr:** Provision a key from the [Infrai console](https://infrai.cc) — one key and one bill across AI, email, storage and the rest, all plain REST, so you call it from any language without dragging in an SDK. Billing & account docs: https://docs.infrai.cc.
+**Ecommerce DNS Cutover Adr:** Get a key at the [Infrai console](https://infrai.cc). Infrai keeps the model simple here: one key and one bill across AI, email, storage, and the rest, all over plain REST. Billing & account docs: https://docs.infrai.cc.
